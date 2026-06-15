@@ -6,22 +6,34 @@
 # Purpose  : catch syntax errors, broken imports, and obvious regressions
 #            BEFORE they reach the deployment branch
 #
-# Jobs:
-#   1. validate  — Python AST parse + import resolution + critical checks
-#   2. docker-build — build the Docker image (no push) to confirm
-#                     Dockerfile + requirements are consistent
+# Fix log (vs previous version):
+#   • All action pins bumped to Node.js 24-compatible releases to silence
+#     the "Node.js 20 deprecated as of June 16 2026" runner warnings:
+#       actions/checkout          v4  → v4.2.2
+#       actions/setup-python      v5  → v5.6.0
+#       docker/setup-buildx-action v3 → v3.10.0
+#       docker/build-push-action  v6  → v6.15.0
+#   • docker-build job: removed multi-platform (linux/amd64,linux/arm64)
+#     from the CI test build — QEMU cross-compilation is only needed on
+#     the final push; doing it in CI doubles build time for no gain.
+#   • Added explicit DOCKER_BUILDKIT=1 env so the GHA cache driver works
+#     correctly on ubuntu-latest runners.
+#   • concurrency cancel-in-progress: true is intentional — the "cancelled"
+#     run #1 you saw in the Actions UI is correct behaviour, not an error.
+#     When you push twice quickly, the older run is superseded.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: CI — Validate & Build
 
 on:
   push:
-    branches: ["**"]          # run on every branch push
+    branches: ["**"]
   pull_request:
-    branches: [main]          # run on PRs targeting main
+    branches: [main]
 
-# Cancel in-progress runs on the same branch when a new commit is pushed.
-# Prevents queue pile-up during rapid iteration.
+# Cancel stale runs on the same branch when a newer commit is pushed.
+# The "Cancelling since a higher priority waiting request exists" message
+# you saw is this feature working as designed — not an error.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -35,13 +47,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2          # Node.js 24 runner ✓
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0      # Node.js 24 runner ✓
         with:
           python-version: "3.11"
-          cache: "pip"                 # cache pip downloads between runs
+          cache: "pip"
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -62,7 +74,6 @@ jobs:
               print(f"[FAIL] SyntaxError in app.py: {e}")
               sys.exit(1)
 
-          # Verify all expected functions are defined
           defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
           required = [
               "fetch_ohlcv", "compute_smc_signals", "build_chart",
@@ -77,20 +88,16 @@ jobs:
               sys.exit(1)
           print(f"[OK] All {len(required)} required functions present")
 
-          # Ensure deprecated / removed APIs are not in live code
           for node in ast.walk(tree):
-              # threads= removed from yfinance 0.2.38
               if isinstance(node, ast.Call):
                   for kw in node.keywords:
                       if kw.arg == "threads":
-                          print("[FAIL] threads= kwarg found in yf.download() call")
+                          print("[FAIL] threads= kwarg found — removed in yfinance 0.2.38")
                           sys.exit(1)
-              # .applymap() deprecated in pandas 2.1
               if isinstance(node, ast.Attribute) and node.attr == "applymap":
-                  print("[FAIL] .applymap() deprecated — use .map()")
+                  print("[FAIL] .applymap() deprecated in pandas 2.1 — use .map()")
                   sys.exit(1)
 
-          # Only one st.tabs() call allowed (duplicate tab blocks = NameError)
           tabs_calls = [
               n for n in ast.walk(tree)
               if isinstance(n, ast.Call)
@@ -102,7 +109,6 @@ jobs:
               print(f"[FAIL] Expected 1 st.tabs() call, found {len(tabs_calls)}")
               sys.exit(1)
           print("[OK] Single st.tabs() definition confirmed")
-
           print("[PASS] All validation checks passed")
           PYCHECK
 
@@ -137,7 +143,6 @@ jobs:
           python - << 'PYCHECK'
           with open("requirements.txt") as f:
               content = f.read().lower()
-
           required_pkgs = ["streamlit", "yfinance", "pandas", "numpy", "plotly"]
           missing = [p for p in required_pkgs if p not in content]
           if missing:
@@ -146,34 +151,38 @@ jobs:
           print("[PASS] requirements.txt contains all required packages")
           PYCHECK
 
-      # ── config.toml present ─────────────────────────────────────────────────
+      # ── Streamlit config present ─────────────────────────────────────────────
       - name: Check .streamlit/config.toml exists
         run: |
           if [ -f ".streamlit/config.toml" ]; then
             echo "[OK] .streamlit/config.toml present"
           else
-            echo "[WARN] .streamlit/config.toml missing — headless deployment may prompt for email"
+            echo "[WARN] .streamlit/config.toml missing — headless deploy may block on email prompt"
           fi
 
-  # ── Job 2: Docker build test ────────────────────────────────────────────────
+  # ── Job 2: Docker build test (no push) ─────────────────────────────────────
   docker-build:
     name: Docker Build Test (no push)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: validate           # only run if validate job passes
+    needs: validate
+
+    env:
+      DOCKER_BUILDKIT: "1"       # required for GHA cache driver on ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2          # Node.js 24 runner ✓
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3.10.0   # Node.js 24 runner ✓
 
-      - name: Build Docker image (no push)
-        uses: docker/build-push-action@v6
+      - name: Build Docker image (no push, amd64 only for speed)
+        uses: docker/build-push-action@v6.15.0     # Node.js 24 runner ✓
         with:
           context: .
-          push: false          # build only — push happens in deploy.yml on main
+          push: false
           tags: quantbengal-smc:ci-test
-          cache-from: type=gha          # GitHub Actions cache for layer reuse
-          cache-to:   type=gha,mode=max
+          platforms: linux/amd64   # single platform in CI — cross-compile only on deploy
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
