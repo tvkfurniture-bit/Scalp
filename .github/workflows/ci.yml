@@ -1,0 +1,179 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/ci.yml
+# QuantBengal Pro SMC Terminal — Continuous Integration
+#
+# Triggers : every push to any branch + every pull request targeting main
+# Purpose  : catch syntax errors, broken imports, and obvious regressions
+#            BEFORE they reach the deployment branch
+#
+# Jobs:
+#   1. validate  — Python AST parse + import resolution + critical checks
+#   2. docker-build — build the Docker image (no push) to confirm
+#                     Dockerfile + requirements are consistent
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI — Validate & Build
+
+on:
+  push:
+    branches: ["**"]          # run on every branch push
+  pull_request:
+    branches: [main]          # run on PRs targeting main
+
+# Cancel in-progress runs on the same branch when a new commit is pushed.
+# Prevents queue pile-up during rapid iteration.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Job 1: Python validation ────────────────────────────────────────────────
+  validate:
+    name: Python Syntax & Import Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"                 # cache pip downloads between runs
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── AST syntax parse ────────────────────────────────────────────────────
+      - name: Parse app.py (AST syntax check)
+        run: |
+          python - << 'PYCHECK'
+          import ast, sys
+
+          with open("app.py") as f:
+              src = f.read()
+
+          try:
+              tree = ast.parse(src)
+              print(f"[OK] app.py parses cleanly ({len(src.splitlines())} lines)")
+          except SyntaxError as e:
+              print(f"[FAIL] SyntaxError in app.py: {e}")
+              sys.exit(1)
+
+          # Verify all expected functions are defined
+          defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+          required = [
+              "fetch_ohlcv", "compute_smc_signals", "build_chart",
+              "build_kpi_html", "build_signal_table",
+              "run_backtest", "compute_bt_stats",
+              "build_equity_curve_timeseries", "build_result_donut",
+              "render_radar_banner", "render_radar_metrics",
+          ]
+          missing = [f for f in required if f not in defined]
+          if missing:
+              print(f"[FAIL] Missing functions: {missing}")
+              sys.exit(1)
+          print(f"[OK] All {len(required)} required functions present")
+
+          # Ensure deprecated / removed APIs are not in live code
+          for node in ast.walk(tree):
+              # threads= removed from yfinance 0.2.38
+              if isinstance(node, ast.Call):
+                  for kw in node.keywords:
+                      if kw.arg == "threads":
+                          print("[FAIL] threads= kwarg found in yf.download() call")
+                          sys.exit(1)
+              # .applymap() deprecated in pandas 2.1
+              if isinstance(node, ast.Attribute) and node.attr == "applymap":
+                  print("[FAIL] .applymap() deprecated — use .map()")
+                  sys.exit(1)
+
+          # Only one st.tabs() call allowed (duplicate tab blocks = NameError)
+          tabs_calls = [
+              n for n in ast.walk(tree)
+              if isinstance(n, ast.Call)
+              and hasattr(n, "func")
+              and isinstance(n.func, ast.Attribute)
+              and n.func.attr == "tabs"
+          ]
+          if len(tabs_calls) != 1:
+              print(f"[FAIL] Expected 1 st.tabs() call, found {len(tabs_calls)}")
+              sys.exit(1)
+          print("[OK] Single st.tabs() definition confirmed")
+
+          print("[PASS] All validation checks passed")
+          PYCHECK
+
+      # ── Import resolution ───────────────────────────────────────────────────
+      - name: Verify all imports resolve
+        run: |
+          python - << 'PYCHECK'
+          import importlib, sys
+
+          required_modules = [
+              "streamlit", "pandas", "numpy", "yfinance",
+              "plotly.graph_objects", "plotly.subplots",
+          ]
+          failed = []
+          for mod in required_modules:
+              try:
+                  importlib.import_module(mod)
+                  print(f"[OK] {mod}")
+              except ImportError as e:
+                  print(f"[FAIL] {mod}: {e}")
+                  failed.append(mod)
+
+          if failed:
+              print(f"\nFailed imports: {failed}")
+              sys.exit(1)
+          print("\n[PASS] All imports resolve correctly")
+          PYCHECK
+
+      # ── requirements.txt completeness ───────────────────────────────────────
+      - name: Verify requirements.txt contains all packages
+        run: |
+          python - << 'PYCHECK'
+          with open("requirements.txt") as f:
+              content = f.read().lower()
+
+          required_pkgs = ["streamlit", "yfinance", "pandas", "numpy", "plotly"]
+          missing = [p for p in required_pkgs if p not in content]
+          if missing:
+              print(f"[FAIL] Missing from requirements.txt: {missing}")
+              exit(1)
+          print("[PASS] requirements.txt contains all required packages")
+          PYCHECK
+
+      # ── config.toml present ─────────────────────────────────────────────────
+      - name: Check .streamlit/config.toml exists
+        run: |
+          if [ -f ".streamlit/config.toml" ]; then
+            echo "[OK] .streamlit/config.toml present"
+          else
+            echo "[WARN] .streamlit/config.toml missing — headless deployment may prompt for email"
+          fi
+
+  # ── Job 2: Docker build test ────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build Test (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: validate           # only run if validate job passes
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false          # build only — push happens in deploy.yml on main
+          tags: quantbengal-smc:ci-test
+          cache-from: type=gha          # GitHub Actions cache for layer reuse
+          cache-to:   type=gha,mode=max
