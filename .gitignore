@@ -1,0 +1,55 @@
+# QuantBengal Pro SMC Terminal — .gitignore
+# ─────────────────────────────────────────
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets — NEVER commit API keys, tokens, or credentials
+.env
+.env.*
+*.pem
+*.key
+secrets.toml
+
+# Streamlit local cache (generated at runtime, not source)
+.streamlit/secrets.toml    # API keys for cloud deployment — never commit
+
+# Docker local artefacts
+*.tar
+
+# Test outputs
+htmlcov/
+.coverage
+.pytest_cache/
