@@ -1,0 +1,273 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .github/workflows/deploy.yml
+# QuantBengal Pro SMC Terminal — Deployment Pipeline
+#
+# Triggers : push to main branch ONLY (after PR is merged)
+# Purpose  : build, tag, and publish a production Docker image to
+#            GitHub Container Registry (GHCR), then optionally trigger
+#            a redeploy on Railway or Render via webhook.
+#
+# Deployment targets supported by this workflow:
+#
+#   A. Streamlit Community Cloud (https://share.streamlit.io)
+#      → Watches your GitHub repo directly. No Actions step needed for deploy.
+#      → The validate job in ci.yml IS your quality gate before it auto-deploys.
+#      → Setup: connect repo at share.streamlit.io, set Main file = app.py
+#
+#   B. Docker → GitHub Container Registry (GHCR)   ← automated here
+#      → Image: ghcr.io/<your-github-username>/<repo-name>:latest
+#      → Pull and run on any VPS, Railway, Render, Fly.io, etc.
+#
+#   C. Railway  (optional — uncomment the railway-deploy job below)
+#      → Requires RAILWAY_TOKEN secret in repo Settings → Secrets
+#
+#   D. Render   (optional — uncomment the render-deploy job below)
+#      → Requires RENDER_DEPLOY_HOOK_URL secret in repo Settings → Secrets
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# REQUIRED GITHUB SECRETS  (Settings → Secrets and variables → Actions):
+#
+#   For GHCR push (mandatory for Docker path):
+#     GHCR login uses GITHUB_TOKEN automatically — no extra secret needed.
+#
+#   For Railway deployment (optional):
+#     RAILWAY_TOKEN   — from railway.app → Account Settings → Tokens
+#
+#   For Render deployment (optional):
+#     RENDER_DEPLOY_HOOK_URL  — from render.com → Service → Settings → Deploy Hook
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy — Build & Publish
+
+on:
+  push:
+    branches: [main]           # deploy only when code lands on main
+  workflow_dispatch:           # allow manual trigger from GitHub Actions UI
+
+# One deploy at a time — never let two deploys run in parallel
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false    # do NOT cancel an in-flight deploy; let it finish
+
+env:
+  # GitHub Container Registry image name — automatically uses repo owner + name
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ── Job 1: Re-run validation before any deployment ─────────────────────────
+  pre-deploy-validate:
+    name: Pre-deploy Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Full validation gate
+        run: |
+          python - << 'PYCHECK'
+          import ast, sys
+
+          with open("app.py") as f:
+              src = f.read()
+
+          try:
+              tree = ast.parse(src)
+          except SyntaxError as e:
+              print(f"[BLOCK] SyntaxError — deployment blocked: {e}")
+              sys.exit(1)
+
+          required_fns = [
+              "fetch_ohlcv", "compute_smc_signals", "build_chart",
+              "build_kpi_html", "build_signal_table",
+              "run_backtest", "compute_bt_stats",
+              "build_equity_curve_timeseries", "build_result_donut",
+              "render_radar_banner", "render_radar_metrics",
+          ]
+          defined = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+          missing = [f for f in required_fns if f not in defined]
+          if missing:
+              print(f"[BLOCK] Missing functions — deployment blocked: {missing}")
+              sys.exit(1)
+
+          tabs = [n for n in ast.walk(tree)
+                  if isinstance(n, ast.Call) and hasattr(n, "func")
+                  and isinstance(n.func, ast.Attribute) and n.func.attr == "tabs"]
+          if len(tabs) != 1:
+              print(f"[BLOCK] {len(tabs)} st.tabs() calls — duplicate tab block detected")
+              sys.exit(1)
+
+          print(f"[PASS] app.py validated — {len(src.splitlines())} lines, "
+                f"{len(required_fns)} functions present, single tab block confirmed")
+          PYCHECK
+
+  # ── Job 2: Build Docker image and push to GHCR ─────────────────────────────
+  docker-publish:
+    name: Build & Push Docker Image to GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: pre-deploy-validate
+
+    permissions:
+      contents: read
+      packages: write          # required to push to ghcr.io
+
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag:    ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided by Actions
+
+      # Generate image tags:
+      #   latest          → always points to most recent main build
+      #   sha-<commit>    → immutable tag for rollback
+      #   YYYY-MM-DD      → date tag for audit trail
+      - name: Extract Docker metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+            type=schedule,pattern={{date 'YYYY-MM-DD'}}
+          labels: |
+            org.opencontainers.image.title=QuantBengal Pro SMC Terminal
+            org.opencontainers.image.description=Smart Money Concepts Liquidity Sweep Detection Terminal
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags:       ${{ steps.meta.outputs.tags }}
+          labels:     ${{ steps.meta.outputs.labels }}
+          platforms:  linux/amd64,linux/arm64    # support both x86 VPS and ARM (Fly.io / M-series Mac)
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Print published image details
+        run: |
+          echo "==========================================="
+          echo "  Image published to GHCR successfully"
+          echo "  Tags   : ${{ steps.meta.outputs.tags }}"
+          echo "  Digest : ${{ steps.build.outputs.digest }}"
+          echo "==========================================="
+          echo ""
+          echo "  Pull and run with:"
+          echo "  docker pull ${{ env.IMAGE_NAME }}:latest"
+          echo "  docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:latest"
+
+  # ── Job 3: Railway deployment (OPTIONAL) ───────────────────────────────────
+  # Uncomment this entire job to enable Railway auto-deploy.
+  # Requires RAILWAY_TOKEN in repo Secrets.
+  #
+  # railway-deploy:
+  #   name: Deploy to Railway
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 10
+  #   needs: docker-publish
+  #
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Install Railway CLI
+  #       run: npm install -g @railway/cli
+  #
+  #     - name: Deploy to Railway
+  #       env:
+  #         RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+  #       run: |
+  #         railway up --service quantbengal-smc --detach
+  #         echo "Railway deployment triggered"
+
+  # ── Job 4: Render deployment (OPTIONAL) ────────────────────────────────────
+  # Uncomment this entire job to enable Render auto-deploy via deploy hook.
+  # Requires RENDER_DEPLOY_HOOK_URL in repo Secrets.
+  #
+  # render-deploy:
+  #   name: Trigger Render Deploy Hook
+  #   runs-on: ubuntu-latest
+  #   timeout-minutes: 5
+  #   needs: docker-publish
+  #
+  #   steps:
+  #     - name: Trigger Render redeploy
+  #       run: |
+  #         curl -s -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+  #           -H "Content-Type: application/json" \
+  #           --fail-with-body
+  #         echo "Render deploy hook triggered"
+
+  # ── Job 5: Post-deploy summary ─────────────────────────────────────────────
+  deploy-summary:
+    name: Deployment Summary
+    runs-on: ubuntu-latest
+    needs: docker-publish
+    if: always()
+
+    steps:
+      - name: Write job summary to GitHub Actions UI
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << 'SUMMARY'
+          ## QuantBengal Pro SMC Terminal — Deployment Summary
+
+          | Item | Value |
+          |---|---|
+          | **Trigger** | Push to `main` |
+          | **Commit** | `${{ github.sha }}` |
+          | **Actor** | `${{ github.actor }}` |
+          | **Image** | `${{ env.IMAGE_NAME }}:latest` |
+          | **Status** | ${{ needs.docker-publish.result }} |
+
+          ### Pull and run the published image
+
+          ```bash
+          docker pull ${{ env.IMAGE_NAME }}:latest
+          docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:latest
+          # Open: http://localhost:8501
+          ```
+
+          ### Streamlit Community Cloud
+          If you have connected this repo at [share.streamlit.io](https://share.streamlit.io),
+          it will auto-deploy from `main` within 1-2 minutes of this push.
+          No additional action required.
+
+          ### Rollback
+          ```bash
+          # Roll back to a specific commit tag
+          docker pull ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          ```
+          SUMMARY
