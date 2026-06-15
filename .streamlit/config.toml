@@ -1,35 +1,81 @@
 # .streamlit/config.toml
 # QuantBengal Pro SMC Terminal — Streamlit runtime configuration
-# Required for headless / containerised deployments:
-#   • Disables the email prompt that blocks startup in CI/Docker
-#   • Sets the server port and disables auto browser-open
-#   • Enables CORS for reverse-proxy setups (Railway, Render, nginx)
-# ─────────────────────────────────────────────────────────────────
+#
+# ─── LOCAL DEVELOPMENT (default) ──────────────────────────────────
+# Run with:  streamlit run app.py
+# Access at: http://localhost:8501
+#
+# ─── DOCKER / CLOUD (override via env vars) ───────────────────────
+# Pass these environment variables to your container or cloud runner
+# to switch from local-dev mode to headless server mode:
+#
+#   STREAMLIT_SERVER_HEADLESS=true
+#   STREAMLIT_SERVER_ENABLE_CORS=false
+#   STREAMLIT_SERVER_PORT=8501
+#   STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+#
+# Environment variables ALWAYS override this file, so this file
+# stays tuned for local development and cloud overrides at runtime.
+# ──────────────────────────────────────────────────────────────────
 
 [global]
-# Suppress the "Do you want to receive updates?" email prompt
-# on first run — mandatory for non-interactive CI/container startup
+# Suppress the email/newsletter prompt on first launch.
+# Safe to set false everywhere — does not affect functionality.
 developmentMode = false
 
 [browser]
-# Do not attempt to open a browser window — headless environments
-# have no display; this prevents a startup hang
+# Do not send anonymous usage statistics to Streamlit Inc.
 gatherUsageStats = false
+# serverAddress and serverPort control what URL Streamlit prints
+# in the terminal on startup. Leave as localhost for local dev.
+serverAddress = "localhost"
+serverPort = 8501
 
 [server]
-# Port the Streamlit server listens on inside the container.
-# Railway / Render inject $PORT at runtime; override with env var
-# STREAMLIT_SERVER_PORT if needed (see deploy.yml).
-port            = 8501
-headless        = true          # never open a browser tab automatically
-enableCORS      = false         # handled by the reverse proxy (Railway/Render/nginx)
+port = 8501
+
+# ── CRITICAL LOCAL DEV SETTING ────────────────────────────────────
+# headless = false  → Streamlit serves the full frontend JS bundle
+#                    and opens a browser tab automatically.
+#                    Required for local development.
+#
+# headless = true   → Streamlit runs without a browser (Docker/cloud).
+#                    DO NOT set true for local development — it breaks
+#                    the WebSocket connection and causes:
+#                      • ERR_CERT_AUTHORITY_INVALID on script.js
+#                      • INITIAL -> BOOTING state machine stuck
+#                      • Tracking Prevention storage errors in Edge
+#
+# Override for cloud/Docker via env var:
+#   STREAMLIT_SERVER_HEADLESS=true
+headless = false
+
+# ── CORS ──────────────────────────────────────────────────────────
+# enableCORS = true  → Required for local development so the browser
+#                      can load Streamlit's JS/CSS assets from the
+#                      same origin without certificate errors.
+#
+# enableCORS = false → Only correct when a reverse proxy (nginx,
+#                      Railway, Render) handles CORS headers upstream.
+#                      Setting false locally causes script.js to fail
+#                      with net::ERR_CERT_AUTHORITY_INVALID in Edge.
+#
+# Override for cloud via env var:
+#   STREAMLIT_SERVER_ENABLE_CORS=false
+enableCORS = true
+
+# XSRF protection — safe to keep on everywhere
 enableXsrfProtection = true
 
+# Maximum upload size in MB (default 200 — keep for file uploads)
+maxUploadSize = 200
+
 [theme]
-# Dark terminal theme — matches the app's CSS palette exactly.
-# Streamlit uses this for the native widgets (sliders, selects, metrics).
-base            = "dark"
-backgroundColor         = "#0A0E14"
+# Dark terminal theme matching the app CSS palette.
+# These values are used by Streamlit's native widget renderer
+# (sliders, select boxes, metric tiles, etc.)
+base                     = "dark"
+backgroundColor          = "#0A0E14"
 secondaryBackgroundColor = "#0D1117"
-textColor               = "#CDD6F4"
-primaryColor            = "#89DCEB"
+textColor                = "#CDD6F4"
+primaryColor             = "#89DCEB"
