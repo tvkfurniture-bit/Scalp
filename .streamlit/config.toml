@@ -1,0 +1,35 @@
+# .streamlit/config.toml
+# QuantBengal Pro SMC Terminal — Streamlit runtime configuration
+# Required for headless / containerised deployments:
+#   • Disables the email prompt that blocks startup in CI/Docker
+#   • Sets the server port and disables auto browser-open
+#   • Enables CORS for reverse-proxy setups (Railway, Render, nginx)
+# ─────────────────────────────────────────────────────────────────
+
+[global]
+# Suppress the "Do you want to receive updates?" email prompt
+# on first run — mandatory for non-interactive CI/container startup
+developmentMode = false
+
+[browser]
+# Do not attempt to open a browser window — headless environments
+# have no display; this prevents a startup hang
+gatherUsageStats = false
+
+[server]
+# Port the Streamlit server listens on inside the container.
+# Railway / Render inject $PORT at runtime; override with env var
+# STREAMLIT_SERVER_PORT if needed (see deploy.yml).
+port            = 8501
+headless        = true          # never open a browser tab automatically
+enableCORS      = false         # handled by the reverse proxy (Railway/Render/nginx)
+enableXsrfProtection = true
+
+[theme]
+# Dark terminal theme — matches the app's CSS palette exactly.
+# Streamlit uses this for the native widgets (sliders, selects, metrics).
+base            = "dark"
+backgroundColor         = "#0A0E14"
+secondaryBackgroundColor = "#0D1117"
+textColor               = "#CDD6F4"
+primaryColor            = "#89DCEB"
