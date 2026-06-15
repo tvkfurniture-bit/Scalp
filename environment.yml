@@ -1,0 +1,43 @@
+# QuantBengal Pro SMC Terminal — Conda environment
+# ─────────────────────────────────────────────────
+# Create : conda env create -f environment.yml
+# Activate: conda activate quantbengal
+# Launch  : streamlit run app.py
+# ─────────────────────────────────────────────────
+
+name: quantbengal
+
+channels:
+  - conda-forge   # primary: most up-to-date builds
+  - defaults      # fallback
+
+dependencies:
+  # ── Runtime ──────────────────────────────────
+  - python=3.11
+
+  # Core data stack — pinned to compatible minor versions
+  - pandas>=2.1.0
+  - numpy>=1.26.0
+
+  # Plotting
+  - plotly>=5.22.0
+
+  # Web framework
+  - streamlit>=1.35.0
+
+  # Market data — not on conda-forge; installed via pip sub-block
+  - pip>=23.0
+
+  - pip:
+      - yfinance>=0.2.40
+
+# ─────────────────────────────────────────────────
+# Notes:
+#   • yfinance is pip-only (not available on conda-forge).
+#   • streamlit may resolve from conda-forge or pip equally well;
+#     conda-forge build is preferred to avoid DLL conflicts on Windows.
+#   • If conda-forge streamlit build is stale, replace with:
+#       - pip:
+#           - streamlit>=1.35.0
+#   • On Apple Silicon (M1/M2/M3) use miniforge, not Anaconda.
+# ─────────────────────────────────────────────────
