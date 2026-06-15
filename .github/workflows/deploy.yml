@@ -3,61 +3,59 @@
 # QuantBengal Pro SMC Terminal — Deployment Pipeline
 #
 # Triggers : push to main branch ONLY (after PR is merged)
-# Purpose  : build, tag, and publish a production Docker image to
-#            GitHub Container Registry (GHCR), then optionally trigger
-#            a redeploy on Railway or Render via webhook.
+#            + manual trigger via workflow_dispatch
 #
-# Deployment targets supported by this workflow:
-#
-#   A. Streamlit Community Cloud (https://share.streamlit.io)
-#      → Watches your GitHub repo directly. No Actions step needed for deploy.
-#      → The validate job in ci.yml IS your quality gate before it auto-deploys.
-#      → Setup: connect repo at share.streamlit.io, set Main file = app.py
-#
-#   B. Docker → GitHub Container Registry (GHCR)   ← automated here
-#      → Image: ghcr.io/<your-github-username>/<repo-name>:latest
-#      → Pull and run on any VPS, Railway, Render, Fly.io, etc.
-#
-#   C. Railway  (optional — uncomment the railway-deploy job below)
-#      → Requires RAILWAY_TOKEN secret in repo Settings → Secrets
-#
-#   D. Render   (optional — uncomment the render-deploy job below)
-#      → Requires RENDER_DEPLOY_HOOK_URL secret in repo Settings → Secrets
+# Fix log (vs previous version):
+#   • All action pins bumped to Node.js 24-compatible releases:
+#       actions/checkout            v4  → v4.2.2
+#       actions/setup-python        v5  → v5.6.0
+#       docker/setup-buildx-action  v3  → v3.10.0
+#       docker/login-action         v3  → v3.4.0
+#       docker/metadata-action      v5  → v5.7.0
+#       docker/build-push-action    v6  → v6.15.0
+#   • Added DOCKER_BUILDKIT=1 env on docker-publish job
+#   • deploy-summary: variables inside heredoc now use bash $VAR substitution
+#     instead of ${{ }} expressions — GHA does not expand context expressions
+#     inside heredoc bodies, which caused blank fields in the summary table.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# REQUIRED GITHUB SECRETS  (Settings → Secrets and variables → Actions):
+# Deployment options:
 #
-#   For GHCR push (mandatory for Docker path):
-#     GHCR login uses GITHUB_TOKEN automatically — no extra secret needed.
+#   A. Streamlit Community Cloud — connect repo at share.streamlit.io
+#      No extra Actions config needed. ci.yml is your quality gate.
+#      Set Main file = app.py, branch = main.
 #
-#   For Railway deployment (optional):
-#     RAILWAY_TOKEN   — from railway.app → Account Settings → Tokens
+#   B. GHCR Docker image — automated by this workflow.
+#      Pull with: docker pull ghcr.io/<owner>/<repo>:latest
 #
-#   For Render deployment (optional):
-#     RENDER_DEPLOY_HOOK_URL  — from render.com → Service → Settings → Deploy Hook
+#   C. Railway  — uncomment the railway-deploy job, add RAILWAY_TOKEN secret
+#   D. Render   — uncomment render-deploy job, add RENDER_DEPLOY_HOOK_URL secret
 #
+# SECRETS NEEDED:
+#   GHCR push  : GITHUB_TOKEN (auto-provided — no setup needed)
+#   Railway    : RAILWAY_TOKEN
+#   Render     : RENDER_DEPLOY_HOOK_URL
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Deploy — Build & Publish
 
 on:
   push:
-    branches: [main]           # deploy only when code lands on main
-  workflow_dispatch:           # allow manual trigger from GitHub Actions UI
+    branches: [main]
+  workflow_dispatch:
 
-# One deploy at a time — never let two deploys run in parallel
+# Never cancel an in-flight deploy — let it finish cleanly
 concurrency:
   group: deploy-production
-  cancel-in-progress: false    # do NOT cancel an in-flight deploy; let it finish
+  cancel-in-progress: false
 
 env:
-  # GitHub Container Registry image name — automatically uses repo owner + name
   IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
   PYTHON_VERSION: "3.11"
 
 jobs:
-  # ── Job 1: Re-run validation before any deployment ─────────────────────────
+  # ── Job 1: Validation gate — must pass before any image is built ────────────
   pre-deploy-validate:
     name: Pre-deploy Validation
     runs-on: ubuntu-latest
@@ -65,10 +63,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2          # Node.js 24 runner ✓
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0      # Node.js 24 runner ✓
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: "pip"
@@ -111,45 +109,48 @@ jobs:
               sys.exit(1)
 
           print(f"[PASS] app.py validated — {len(src.splitlines())} lines, "
-                f"{len(required_fns)} functions present, single tab block confirmed")
+                f"{len(required_fns)} functions confirmed, single tab block OK")
           PYCHECK
 
-  # ── Job 2: Build Docker image and push to GHCR ─────────────────────────────
+  # ── Job 2: Build and push Docker image to GHCR ─────────────────────────────
   docker-publish:
     name: Build & Push Docker Image to GHCR
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     needs: pre-deploy-validate
 
     permissions:
       contents: read
-      packages: write          # required to push to ghcr.io
+      packages: write            # required to push to ghcr.io
+
+    env:
+      DOCKER_BUILDKIT: "1"       # required for GHA cache driver
 
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
-      image-tag:    ${{ steps.meta.outputs.tags }}
+      image-tags:   ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2          # Node.js 24 runner ✓
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3.10.0   # Node.js 24 runner ✓
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v3.4.0       # Node.js 24 runner ✓
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}   # auto-provided by Actions
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Generate image tags:
-      #   latest          → always points to most recent main build
-      #   sha-<commit>    → immutable tag for rollback
-      #   YYYY-MM-DD      → date tag for audit trail
-      - name: Extract Docker metadata (tags + labels)
+      # Tags generated:
+      #   latest        — always the current main build
+      #   sha-<short>   — immutable, use for rollback
+      #   YYYY-MM-DD    — date audit trail
+      - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v5.7.0    # Node.js 24 runner ✓
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -164,33 +165,31 @@ jobs:
             org.opencontainers.image.version=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push image
+      - name: Build and push multi-platform image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v6.15.0 # Node.js 24 runner ✓
         with:
           context: .
           push: true
-          tags:       ${{ steps.meta.outputs.tags }}
-          labels:     ${{ steps.meta.outputs.labels }}
-          platforms:  linux/amd64,linux/arm64    # support both x86 VPS and ARM (Fly.io / M-series Mac)
+          tags:      ${{ steps.meta.outputs.tags }}
+          labels:    ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64   # amd64=VPS, arm64=Fly.io/Apple M-series
           cache-from: type=gha
           cache-to:   type=gha,mode=max
 
       - name: Print published image details
         run: |
-          echo "==========================================="
-          echo "  Image published to GHCR successfully"
-          echo "  Tags   : ${{ steps.meta.outputs.tags }}"
+          echo "=============================================="
+          echo "  GHCR image published successfully"
           echo "  Digest : ${{ steps.build.outputs.digest }}"
-          echo "==========================================="
+          echo "=============================================="
           echo ""
-          echo "  Pull and run with:"
+          echo "  Pull and run:"
           echo "  docker pull ${{ env.IMAGE_NAME }}:latest"
           echo "  docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:latest"
 
   # ── Job 3: Railway deployment (OPTIONAL) ───────────────────────────────────
-  # Uncomment this entire job to enable Railway auto-deploy.
-  # Requires RAILWAY_TOKEN in repo Secrets.
+  # Uncomment to enable. Requires RAILWAY_TOKEN in repo Secrets.
   #
   # railway-deploy:
   #   name: Deploy to Railway
@@ -200,7 +199,7 @@ jobs:
   #
   #   steps:
   #     - name: Checkout repository
-  #       uses: actions/checkout@v4
+  #       uses: actions/checkout@v4.2.2
   #
   #     - name: Install Railway CLI
   #       run: npm install -g @railway/cli
@@ -213,8 +212,7 @@ jobs:
   #         echo "Railway deployment triggered"
 
   # ── Job 4: Render deployment (OPTIONAL) ────────────────────────────────────
-  # Uncomment this entire job to enable Render auto-deploy via deploy hook.
-  # Requires RENDER_DEPLOY_HOOK_URL in repo Secrets.
+  # Uncomment to enable. Requires RENDER_DEPLOY_HOOK_URL in repo Secrets.
   #
   # render-deploy:
   #   name: Trigger Render Deploy Hook
@@ -238,36 +236,44 @@ jobs:
     if: always()
 
     steps:
-      - name: Write job summary to GitHub Actions UI
+      # Fix: ${{ }} expressions don't expand inside heredoc bodies in GHA.
+      # Export values to bash env vars first, then reference with $VAR.
+      - name: Write job summary
+        env:
+          COMMIT_SHA:   ${{ github.sha }}
+          ACTOR:        ${{ github.actor }}
+          IMAGE:        ${{ needs.docker-publish.outputs.image-tags }}
+          BUILD_STATUS: ${{ needs.docker-publish.result }}
+          IMAGE_NAME:   ${{ env.IMAGE_NAME }}
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'SUMMARY'
+          cat >> "$GITHUB_STEP_SUMMARY" << SUMMARY
           ## QuantBengal Pro SMC Terminal — Deployment Summary
 
           | Item | Value |
           |---|---|
-          | **Trigger** | Push to `main` |
-          | **Commit** | `${{ github.sha }}` |
-          | **Actor** | `${{ github.actor }}` |
-          | **Image** | `${{ env.IMAGE_NAME }}:latest` |
-          | **Status** | ${{ needs.docker-publish.result }} |
+          | **Trigger** | Push to \`main\` |
+          | **Commit** | \`${COMMIT_SHA}\` |
+          | **Actor** | \`${ACTOR}\` |
+          | **Image** | \`${IMAGE_NAME}:latest\` |
+          | **Status** | ${BUILD_STATUS} |
 
-          ### Pull and run the published image
+          ### Pull and run
 
-          ```bash
-          docker pull ${{ env.IMAGE_NAME }}:latest
-          docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:latest
+          \`\`\`bash
+          docker pull ${IMAGE_NAME}:latest
+          docker run -p 8501:8501 ${IMAGE_NAME}:latest
           # Open: http://localhost:8501
-          ```
+          \`\`\`
+
+          ### Rollback to this exact commit
+
+          \`\`\`bash
+          docker pull ${IMAGE_NAME}:sha-${COMMIT_SHA:0:7}
+          docker run -p 8501:8501 ${IMAGE_NAME}:sha-${COMMIT_SHA:0:7}
+          \`\`\`
 
           ### Streamlit Community Cloud
-          If you have connected this repo at [share.streamlit.io](https://share.streamlit.io),
-          it will auto-deploy from `main` within 1-2 minutes of this push.
-          No additional action required.
-
-          ### Rollback
-          ```bash
-          # Roll back to a specific commit tag
-          docker pull ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          docker run -p 8501:8501 ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          ```
+          Connected at [share.streamlit.io](https://share.streamlit.io)?
+          It auto-deploys from \`main\` within ~2 minutes of this push.
+          No further action needed.
           SUMMARY
